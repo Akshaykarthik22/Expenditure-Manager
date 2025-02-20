@@ -1,5 +1,8 @@
 import sys
 import mysql.connector
+import calendar
+from datetime import datetime
+from abc import ABC, abstractmethod  # Importing abc module for abstraction
 
 # MySQL Connection
 conn = mysql.connector.connect(
@@ -24,7 +27,35 @@ CREATE TABLE IF NOT EXISTS expenses (
 """)
 conn.commit()
 
-class ExpenseManager:
+# Abstraction: Creating an abstract class
+class ExpenseManagerBase(ABC):
+    @abstractmethod
+    def add_expense(self, amount, date, category, person, is_recurring=False, recurrence=None):
+        pass
+
+    @abstractmethod
+    def view_expenses(self):
+        pass
+
+    @abstractmethod
+    def delete_expense(self, expense_id):
+        pass
+
+    @abstractmethod
+    def update_expense(self, expense_id):
+        pass
+
+    @abstractmethod
+    def view_total_expense_by_month(self, month):
+        pass
+
+    @abstractmethod
+    def reset_all_expenses(self):
+        pass
+
+# Inheritance: ExpenseManager inherits from ExpenseManagerBase
+class ExpenseManager(ExpenseManagerBase):
+    # Encapsulation: Methods work with private database connection and cursor
     def add_expense(self, amount, date, category, person, is_recurring=False, recurrence=None):
         query = "INSERT INTO expenses (amount, date, category, person, is_recurring, recurrence) VALUES (%s, %s, %s, %s, %s, %s)"
         cursor.execute(query, (amount, date, category, person, is_recurring, recurrence))
@@ -39,17 +70,21 @@ class ExpenseManager:
             print("⚠️ No expenses found.")
             return
 
-        print("\n+------------------------------------------------------+")
-        print("|                   View Expenses                     |")
-        print("+------------------------------------------------------+")
-        print("| ID | Amount  | Date       | Category    | Person   | Recurrence |")
-        print("+------------------------------------------------------+")
+        print("\n+---------------------------------------------------------------------+")
+        print("| ID | Amount     | Date        | Category      | Person     | Recurrence |")
+        print("+---------------------------------------------------------------------+")
 
         for row in expenses:
-            recurrence_display = row[6] if row[5] else "N/A"  # Handling the recurrence column properly
-            print(f"| {row[0]:<2} | {row[1]:<7} | {row[2]:<10} | {row[3]:<10} | {row[4]:<8} | {recurrence_display:<10} |")
+            expense_id = row[0]
+            amount = row[1]
+            date = row[2].strftime("%Y-%m-%d")  # Properly format the date
+            category = row[3]
+            person = row[4]
+            recurrence_display = row[6] if row[5] else "N/A"
 
-        print("+------------------------------------------------------+\n")
+            print(f"| {expense_id:<2} | {amount:<10} | {date:<12} | {category:<12} | {person:<10} | {recurrence_display:<10} |")
+
+        print("+---------------------------------------------------------------------+\n")
 
     def delete_expense(self, expense_id):
         cursor.execute("DELETE FROM expenses WHERE id = %s", (expense_id,))
@@ -70,18 +105,26 @@ class ExpenseManager:
         print("✅ Expense updated successfully.")
 
     def view_total_expense_by_month(self, month):
+        year, month_num = map(int, month.split("-"))
+        _, days_in_month = calendar.monthrange(year, month_num)
+        num_weeks = len([day for day in range(1, days_in_month + 1) if datetime(year, month_num, day).weekday() == 0])
+        
         cursor.execute("SELECT amount, recurrence, is_recurring FROM expenses WHERE DATE_FORMAT(date, '%Y-%m') = %s", (month,))
         expenses = cursor.fetchall()
-        total_expense = 0
-
-        for amount, recurrence, is_recurring in expenses:
-            if is_recurring and recurrence == "weekly":
-                total_expense += amount * 4.33  # 4.33 weeks in a month
-            else:
-                total_expense += amount
-
+        total_expense = sum(amount * num_weeks if is_recurring and recurrence == "weekly" else amount for amount, recurrence, is_recurring in expenses)
+        
         print(f"📊 Total expense for {month}: {total_expense}")
 
+    def reset_all_expenses(self):
+        confirm = input("⚠️ Are you sure you want to delete all expenses? (yes/no): ").strip().lower()
+        if confirm == "yes":
+            cursor.execute("TRUNCATE TABLE expenses")
+            conn.commit()
+            print("✅ All expenses deleted and ID reset to 1.")
+        else:
+            print("Operation cancelled.")
+
+    # Polymorphism: Different implementations of 'menu' can exist in other derived classes
     def menu(self):
         while True:
             print("\n+-------------------------------------------+")
@@ -92,7 +135,8 @@ class ExpenseManager:
             print("| 3. Delete Expense                         |")
             print("| 4. View Total Expense for a Month         |")
             print("| 5. Update Expense                         |")
-            print("| 6. Exit                                   |")
+            print("| 6. Reset All Expenses                     |")
+            print("| 7. Exit                                   |")
             print("+-------------------------------------------+")
             choice = input("Enter your choice: ")
 
@@ -116,6 +160,8 @@ class ExpenseManager:
                 expense_id = int(input("Enter expense ID to update: "))
                 self.update_expense(expense_id)
             elif choice == '6':
+                self.reset_all_expenses()
+            elif choice == '7':
                 print("👋 Exiting... Goodbye!")
                 conn.close()
                 sys.exit()
