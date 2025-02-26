@@ -1,179 +1,200 @@
-import sys
 import mysql.connector
-import calendar
+import getpass
+import re
+import hashlib
 from datetime import datetime
-from abc import ABC, abstractmethod
 
-# Abstraction: Creating an abstract base class
-class ExpenseManagerBase(ABC):
-    @abstractmethod
-    def add_expense(self, amount, date, category, person, is_recurring=False, recurrence=None):
-        pass
+# Base class for database handling (Encapsulation & Abstraction)
+class Database:
+    def __init__(self, company_name):
+        self._company_name = re.sub(r'\W+', '_', company_name).lower()  # Private attribute with sanitized DB name
+        self._category_table = f"{self._company_name}_categories"
+        self._expense_table = f"{self._company_name}_expenses"
 
-    @abstractmethod
-    def view_expenses(self):
-        pass
-
-    @abstractmethod
-    def delete_expense(self, expense_id):
-        pass
-
-    @abstractmethod
-    def update_expense(self, expense_id):
-        pass
-
-    @abstractmethod
-    def view_total_expense_by_month(self, month):
-        pass
-
-    @abstractmethod
-    def reset_all_expenses(self):
-        pass
-
-# Inheritance: ExpenseManager inherits from ExpenseManagerBase
-class ExpenseManager(ExpenseManagerBase):
-    def __init__(self):
-        # Encapsulation: Using private attributes
-        self.__conn = mysql.connector.connect(
+        # Private connection to corporate database
+        self._conn = mysql.connector.connect(
             host="localhost",
             user="root",
             password="",
-            database="ExpenseManager"
+            database="corporateexpensemanager"
         )
-        self.__cursor = self.__conn.cursor()
+        self._cursor = self._conn.cursor()
+        
+        self._create_corporate_table()
 
-        # Ensure the table exists
-        self.__cursor.execute("""
-        CREATE TABLE IF NOT EXISTS expenses (
+    def _create_corporate_table(self):
+        """Ensure corporate database has a 'companies' table with secure password storage."""
+        self._cursor.execute("""
+        CREATE TABLE IF NOT EXISTS companies (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(255) UNIQUE NOT NULL,
+            password VARCHAR(255) NOT NULL
+        )""")
+        self._conn.commit()
+
+    def register_company(self, password):
+        """Register a new company and store hashed password securely."""
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+
+        self._cursor.execute("SELECT id FROM companies WHERE name = %s", (self._company_name,))
+        if not self._cursor.fetchone():
+            self._cursor.execute("INSERT INTO companies (name, password) VALUES (%s, %s)", 
+                                 (self._company_name, hashed_password))
+            self._conn.commit()
+            print(f"✅ Company '{self._company_name}' registered successfully!")
+
+            # Create separate database for the company
+            self._create_company_database()
+        else:
+            print("❌ Company already exists. Please log in.")
+
+    def login_company(self, password):
+        """Authenticate company using hashed password verification."""
+        hashed_password = hashlib.sha256(password.encode()).hexdigest()
+        self._cursor.execute("SELECT id FROM companies WHERE name = %s AND password = %s", 
+                             (self._company_name, hashed_password))
+        return bool(self._cursor.fetchone())
+
+    def _create_company_database(self):
+        """Create a separate database for each company."""
+        self._cursor.execute(f"CREATE DATABASE IF NOT EXISTS {self._company_name}")
+        self._conn.commit()
+        print(f"✅ Database '{self._company_name}' is ready.")
+
+    def switch_to_company_db(self):
+        """Switch to the specific company's database and create tables."""
+        self._conn.database = self._company_name
+        self._create_company_tables()
+
+    def _create_company_tables(self):
+        """Create categories and expenses tables inside the company's database."""
+        self._cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS {self._category_table} (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(255) UNIQUE NOT NULL
+        )""")
+        
+        self._cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS {self._expense_table} (
             id INT AUTO_INCREMENT PRIMARY KEY,
             amount FLOAT NOT NULL,
             date DATE NOT NULL,
-            category VARCHAR(50) NOT NULL,
-            person VARCHAR(50) NOT NULL,
-            is_recurring BOOLEAN DEFAULT FALSE,
-            recurrence VARCHAR(20) DEFAULT NULL
-        )
-        """)
-        self.__conn.commit()
+            category_id INT,
+            description TEXT,
+            recurring ENUM('none', 'daily', 'weekly', 'monthly', 'yearly') DEFAULT 'none',
+            FOREIGN KEY (category_id) REFERENCES {self._category_table}(id)
+        )""")
+        self._conn.commit()
 
-    def add_expense(self, amount, date, category, person, is_recurring=False, recurrence=None):
-        query = "INSERT INTO expenses (amount, date, category, person, is_recurring, recurrence) VALUES (%s, %s, %s, %s, %s, %s)"
-        self.__cursor.execute(query, (amount, date, category, person, is_recurring, recurrence))
-        self.__conn.commit()
+    def get_cursor(self):
+        """Encapsulation: Prevent direct access to private cursor"""
+        return self._cursor
+
+    def get_conn(self):
+        """Encapsulation: Prevent direct access to private connection"""
+        return self._conn
+
+    def get_category_table(self):
+        return self._category_table
+
+    def get_expense_table(self):
+        return self._expense_table
+
+
+# ExpenseManager class inherits from Database (Inheritance)
+class ExpenseManager(Database):
+    def __init__(self, db):
+        super().__init__(db._company_name)  # Inheritance: Using parent class constructor
+        self._cursor = db.get_cursor()
+        self._conn = db.get_conn()
+        self._category_table = db.get_category_table()
+        self._expense_table = db.get_expense_table()
+
+    def add_expense(self, amount, date, category, description, recurring):
+        """Polymorphism: Overriding method with additional logic"""
+        self._cursor.execute(f"SELECT id FROM {self._category_table} WHERE name = %s", (category,))
+        result = self._cursor.fetchone()
+        
+        if not result:
+            self._cursor.execute(f"INSERT INTO {self._category_table} (name) VALUES (%s)", (category,))
+            self._conn.commit()
+            category_id = self._cursor.lastrowid
+        else:
+            category_id = result[0]
+        
+        self._cursor.execute(f"""
+        INSERT INTO {self._expense_table} (amount, date, category_id, description, recurring)
+        VALUES (%s, %s, %s, %s, %s)
+        """, (amount, date, category_id, description, recurring))
+        self._conn.commit()
         print("✅ Expense added successfully.")
 
-    def view_expenses(self):
-        self.__cursor.execute("SELECT * FROM expenses")
-        expenses = self.__cursor.fetchall()
-
+    def view_expenses(self, filter_type=None):
+        """View expenses based on optional filters."""
+        query = f"""
+        SELECT e.id, e.amount, e.date, c.name, e.description, e.recurring
+        FROM {self._expense_table} e
+        LEFT JOIN {self._category_table} c ON e.category_id = c.id
+        WHERE 1=1
+        """
+        if filter_type:
+            query += f" AND e.recurring = '{filter_type}'"
+        
+        self._cursor.execute(query)
+        expenses = self._cursor.fetchall()
+        
         if not expenses:
-            print("⚠️ No expenses found.")
+            print("⚠️ No expenses found for the selected filter.")
             return
-
-        print("\n+---------------------------------------------------------------------+")
-        print("| ID | Amount     | Date        | Category      | Person     | Recurrence |")
-        print("+---------------------------------------------------------------------+")
-
+        
+        print("\n+------------------------------------------------------------+")
+        print("| ID | Amount  | Date       | Category    | Description      | Recurring |")
+        print("+------------------------------------------------------------+")
         for row in expenses:
-            expense_id = row[0]
-            amount = row[1]
-            date = row[2].strftime("%Y-%m-%d")
-            category = row[3]
-            person = row[4]
-            recurrence_display = row[6] if row[5] else "N/A"
+            print(f"| {row[0]:<2} | {row[1]:<8} | {row[2]} | {row[3]:<10} | {row[4]:<15} | {row[5]:<9} |")
+        print("+------------------------------------------------------------+\n")
 
-            print(f"| {expense_id:<2} | {amount:<10} | {date:<12} | {category:<12} | {person:<10} | {recurrence_display:<10} |")
 
-        print("+---------------------------------------------------------------------+\n")
-
-    def delete_expense(self, expense_id):
-        self.__cursor.execute("DELETE FROM expenses WHERE id = %s", (expense_id,))
-        self.__conn.commit()
-        print("✅ Expense deleted successfully.")
-
-    def update_expense(self, expense_id):
-        amount = float(input("Enter new amount: "))
-        date = input("Enter new date (YYYY-MM-DD): ")
-        category = input("Enter new category: ")
-        person = input("Enter new person's name: ")
-        recurrence = input("Enter recurrence (weekly/monthly or leave empty): ")
-        is_recurring = bool(recurrence)
-
-        query = "UPDATE expenses SET amount=%s, date=%s, category=%s, person=%s, is_recurring=%s, recurrence=%s WHERE id=%s"
-        self.__cursor.execute(query, (amount, date, category, person, is_recurring, recurrence, expense_id))
-        self.__conn.commit()
-        print("✅ Expense updated successfully.")
-
-    def view_total_expense_by_month(self, month):
-        year, month_num = map(int, month.split("-"))
-        _, days_in_month = calendar.monthrange(year, month_num)
-        num_weeks = len([day for day in range(1, days_in_month + 1) if datetime(year, month_num, day).weekday() == 0])
-        
-        self.__cursor.execute("SELECT amount, recurrence, is_recurring FROM expenses WHERE DATE_FORMAT(date, '%Y-%m') = %s", (month,))
-        expenses = self.__cursor.fetchall()
-        total_expense = sum(amount * num_weeks if is_recurring and recurrence == "weekly" else amount for amount, recurrence, is_recurring in expenses)
-        
-        print(f"📊 Total expense for {month}: {total_expense}")
-
-    def reset_all_expenses(self):
-        confirm = input("⚠️ Are you sure you want to delete all expenses? (yes/no): ").strip().lower()
-        if confirm == "yes":
-            self.__cursor.execute("TRUNCATE TABLE expenses")
-            self.__conn.commit()
-            print("✅ All expenses deleted and ID reset to 1.")
-        else:
-            print("Operation cancelled.")
-
-    # Polymorphism: This method can be overridden
-    def menu(self):
-        while True:
-            print("\n+-------------------------------------------+")
-            print("|           Family Expense Manager          |")
-            print("+-------------------------------------------+")
-            print("| 1. Add Expense                            |")
-            print("| 2. View Expenses                          |")
-            print("| 3. Delete Expense                         |")
-            print("| 4. View Total Expense for a Month         |")
-            print("| 5. Update Expense                         |")
-            print("| 6. Reset All Expenses                     |")
-            print("| 7. Exit                                   |")
-            print("+-------------------------------------------+")
-            choice = input("Enter your choice: ")
-
-            if choice == '1':
-                amount = float(input("Enter amount: "))
-                date = input("Enter date (YYYY-MM-DD): ")
-                category = input("Enter category: ")
-                person = input("Enter family person's name: ")
-                is_recurring = input("Is this a recurring expense? (yes/no): ").strip().lower() == "yes"
-                recurrence = input("Enter recurrence (e.g., monthly, weekly): ") if is_recurring else None
-                self.add_expense(amount, date, category, person, is_recurring, recurrence)
-            elif choice == '2':
-                self.view_expenses()
-            elif choice == '3':
-                expense_id = int(input("Enter expense ID to delete: "))
-                self.delete_expense(expense_id)
-            elif choice == '4':
-                month = input("Enter month to view total expense (YYYY-MM): ")
-                self.view_total_expense_by_month(month)
-            elif choice == '5':
-                expense_id = int(input("Enter expense ID to update: "))
-                self.update_expense(expense_id)
-            elif choice == '6':
-                self.reset_all_expenses()
-            elif choice == '7':
-                print("👋 Exiting... Goodbye!")
-                self.__conn.close()
-                sys.exit()
-            else:
-                print("⚠️ Invalid choice. Please try again.")
-
-# Polymorphism: Subclass that modifies `view_expenses()`
-class AdvancedExpenseManager(ExpenseManager):
-    def view_expenses(self):
-        print("🔍 Fetching expenses with additional analytics...")
-        super().view_expenses()
-
+# Main function implementing User Interaction
 if __name__ == "__main__":
-    manager = AdvancedExpenseManager()  # Using subclass for polymorphism
-    manager.menu()
+    print("📊 Welcome to Corporate Expense Manager!")
+
+    while True:
+        print("\n1. Register\n2. Login\n3. Exit")
+        choice = input("Choose an option: ")
+
+        if choice == '1':  # Register a new company
+            company_name = input("Enter company name: ")
+            password = getpass.getpass("Enter a strong password: ")
+            db = Database(company_name)
+            db.register_company(password)
+
+        elif choice == '2':  # Login to an existing company
+            company_name = input("Enter company name: ")
+            password = getpass.getpass("Enter your password: ")
+            db = Database(company_name)
+
+            if db.login_company(password):
+                print("✅ Login successful!")
+                db.switch_to_company_db()
+                expense_manager = ExpenseManager(db)  # Polymorphism (ExpenseManager inherits Database)
+                while True:
+                    print("\n1. Add Expense\n2. View Expenses\n3. Logout")
+                    option = input("Choose an option: ")
+                    if option == '1':
+                        expense_manager.add_expense(
+                            float(input("Enter amount: ")),
+                            input("Enter date (YYYY-MM-DD): "),
+                            input("Enter category: "),
+                            input("Enter description: "),
+                            input("Enter recurring type: ")
+                        )
+                    elif option == '2':
+                        expense_manager.view_expenses()
+                    elif option == '3':
+                        break
+            else:
+                print("❌ Incorrect password. Try again.")
+
+        elif choice == '3':  # Exit
+            break
