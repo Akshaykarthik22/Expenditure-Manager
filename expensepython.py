@@ -1,200 +1,227 @@
 import mysql.connector
 import getpass
-import re
-import hashlib
-from datetime import datetime
 
-# Base class for database handling (Encapsulation & Abstraction)
-class Database:
+
+# Connect to the main database
+def connect_main_db():
+    return mysql.connector.connect(
+        host="localhost",
+        user="root",
+        password="",
+        database="corporateexpensemanager"
+    )
+
+
+# Register a new company and create its own database
+def register_company(conn, name, password):
+    cursor = conn.cursor()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS companies (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) UNIQUE NOT NULL,
+        password TEXT NOT NULL
+    )""")
+    try:
+        cursor.execute("INSERT INTO companies (name, password) VALUES (%s, %s)", (name, password))
+        conn.commit()
+        print(f"✅ Company '{name}' registered successfully!")
+
+        company_db_name = f"{name.lower()}_db"
+        cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{company_db_name}`")
+        print(f"✅ Database '{company_db_name}' created!")
+
+        company_conn = mysql.connector.connect(
+            host="localhost",
+            user="root",
+            password="",
+            database=company_db_name
+        )
+        company_cursor = company_conn.cursor()
+        company_cursor.execute("""
+        CREATE TABLE IF NOT EXISTS categories (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(255) UNIQUE NOT NULL
+        )""")
+        company_cursor.execute("""
+        CREATE TABLE IF NOT EXISTS expenses (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            amount DECIMAL(10,2) NOT NULL,
+            date DATE NOT NULL,
+            category_id INT,
+            description TEXT,
+            FOREIGN KEY (category_id) REFERENCES categories(id)
+        )""")
+        company_conn.commit()
+        company_cursor.close()
+        company_conn.close()
+
+    except mysql.connector.IntegrityError:
+        print("❌ Company already exists!")
+    cursor.close()
+
+
+# Reset the companies table and IDs
+def reset_companies_table(conn):
+    cursor = conn.cursor()
+    confirm = input("⚠️ Are you sure you want to reset the companies table? This will delete ALL companies! (yes/no): ")
+    if confirm.lower() == "yes":
+        cursor.execute("DELETE FROM companies")
+        cursor.execute("ALTER TABLE companies AUTO_INCREMENT = 1")
+        conn.commit()
+        print("✅ Companies table reset successfully. All records deleted, IDs start from 1.")
+    else:
+        print("❌ Reset cancelled.")
+    cursor.close()
+
+
+# Expense Manager class
+class ExpenseManager:
     def __init__(self, company_name):
-        self._company_name = re.sub(r'\W+', '_', company_name).lower()  # Private attribute with sanitized DB name
-        self._category_table = f"{self._company_name}_categories"
-        self._expense_table = f"{self._company_name}_expenses"
-
-        # Private connection to corporate database
+        company_db = f"{company_name.lower()}_db"
         self._conn = mysql.connector.connect(
             host="localhost",
             user="root",
             password="",
-            database="corporateexpensemanager"
+            database=company_db
         )
         self._cursor = self._conn.cursor()
-        
-        self._create_corporate_table()
 
-    def _create_corporate_table(self):
-        """Ensure corporate database has a 'companies' table with secure password storage."""
-        self._cursor.execute("""
-        CREATE TABLE IF NOT EXISTS companies (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            name VARCHAR(255) UNIQUE NOT NULL,
-            password VARCHAR(255) NOT NULL
-        )""")
-        self._conn.commit()
-
-    def register_company(self, password):
-        """Register a new company and store hashed password securely."""
-        hashed_password = hashlib.sha256(password.encode()).hexdigest()
-
-        self._cursor.execute("SELECT id FROM companies WHERE name = %s", (self._company_name,))
-        if not self._cursor.fetchone():
-            self._cursor.execute("INSERT INTO companies (name, password) VALUES (%s, %s)", 
-                                 (self._company_name, hashed_password))
-            self._conn.commit()
-            print(f"✅ Company '{self._company_name}' registered successfully!")
-
-            # Create separate database for the company
-            self._create_company_database()
-        else:
-            print("❌ Company already exists. Please log in.")
-
-    def login_company(self, password):
-        """Authenticate company using hashed password verification."""
-        hashed_password = hashlib.sha256(password.encode()).hexdigest()
-        self._cursor.execute("SELECT id FROM companies WHERE name = %s AND password = %s", 
-                             (self._company_name, hashed_password))
-        return bool(self._cursor.fetchone())
-
-    def _create_company_database(self):
-        """Create a separate database for each company."""
-        self._cursor.execute(f"CREATE DATABASE IF NOT EXISTS {self._company_name}")
-        self._conn.commit()
-        print(f"✅ Database '{self._company_name}' is ready.")
-
-    def switch_to_company_db(self):
-        """Switch to the specific company's database and create tables."""
-        self._conn.database = self._company_name
-        self._create_company_tables()
-
-    def _create_company_tables(self):
-        """Create categories and expenses tables inside the company's database."""
-        self._cursor.execute(f"""
-        CREATE TABLE IF NOT EXISTS {self._category_table} (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            name VARCHAR(255) UNIQUE NOT NULL
-        )""")
-        
-        self._cursor.execute(f"""
-        CREATE TABLE IF NOT EXISTS {self._expense_table} (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            amount FLOAT NOT NULL,
-            date DATE NOT NULL,
-            category_id INT,
-            description TEXT,
-            recurring ENUM('none', 'daily', 'weekly', 'monthly', 'yearly') DEFAULT 'none',
-            FOREIGN KEY (category_id) REFERENCES {self._category_table}(id)
-        )""")
-        self._conn.commit()
-
-    def get_cursor(self):
-        """Encapsulation: Prevent direct access to private cursor"""
-        return self._cursor
-
-    def get_conn(self):
-        """Encapsulation: Prevent direct access to private connection"""
-        return self._conn
-
-    def get_category_table(self):
-        return self._category_table
-
-    def get_expense_table(self):
-        return self._expense_table
-
-
-# ExpenseManager class inherits from Database (Inheritance)
-class ExpenseManager(Database):
-    def __init__(self, db):
-        super().__init__(db._company_name)  # Inheritance: Using parent class constructor
-        self._cursor = db.get_cursor()
-        self._conn = db.get_conn()
-        self._category_table = db.get_category_table()
-        self._expense_table = db.get_expense_table()
-
-    def add_expense(self, amount, date, category, description, recurring):
-        """Polymorphism: Overriding method with additional logic"""
-        self._cursor.execute(f"SELECT id FROM {self._category_table} WHERE name = %s", (category,))
+    def add_expense(self, amount, date, category, description):
+        self._cursor.execute("SELECT id FROM categories WHERE name = %s", (category,))
         result = self._cursor.fetchone()
-        
         if not result:
-            self._cursor.execute(f"INSERT INTO {self._category_table} (name) VALUES (%s)", (category,))
+            self._cursor.execute("INSERT INTO categories (name) VALUES (%s)", (category,))
             self._conn.commit()
             category_id = self._cursor.lastrowid
         else:
             category_id = result[0]
-        
-        self._cursor.execute(f"""
-        INSERT INTO {self._expense_table} (amount, date, category_id, description, recurring)
-        VALUES (%s, %s, %s, %s, %s)
-        """, (amount, date, category_id, description, recurring))
+
+        self._cursor.execute(
+            "INSERT INTO expenses (amount, date, category_id, description) VALUES (%s, %s, %s, %s)",
+            (amount, date, category_id, description)
+        )
         self._conn.commit()
         print("✅ Expense added successfully.")
 
-    def view_expenses(self, filter_type=None):
-        """View expenses based on optional filters."""
-        query = f"""
-        SELECT e.id, e.amount, e.date, c.name, e.description, e.recurring
-        FROM {self._expense_table} e
-        LEFT JOIN {self._category_table} c ON e.category_id = c.id
-        WHERE 1=1
-        """
-        if filter_type:
-            query += f" AND e.recurring = '{filter_type}'"
-        
-        self._cursor.execute(query)
+    def delete_expense(self, expense_id):
+        self._cursor.execute("DELETE FROM expenses WHERE id = %s", (expense_id,))
+        self._conn.commit()
+
+        # Reset IDs after deletion
+        self._cursor.execute("SET @count = 0;")
+        self._cursor.execute("UPDATE expenses SET id = (@count := @count + 1);")
+        self._cursor.execute("ALTER TABLE expenses AUTO_INCREMENT = 1;")
+        self._conn.commit()
+
+        print("✅ Expense deleted and IDs reset.")
+
+    def modify_expense(self, expense_id, amount, date, category, description):
+        self._cursor.execute("SELECT id FROM categories WHERE name = %s", (category,))
+        result = self._cursor.fetchone()
+        if not result:
+            self._cursor.execute("INSERT INTO categories (name) VALUES (%s)", (category,))
+            self._conn.commit()
+            category_id = self._cursor.lastrowid
+        else:
+            category_id = result[0]
+
+        self._cursor.execute("""
+        UPDATE expenses
+        SET amount = %s, date = %s, category_id = %s, description = %s
+        WHERE id = %s
+        """, (amount, date, category_id, description, expense_id))
+        self._conn.commit()
+        print("✅ Expense modified successfully.")
+
+    def view_expenses(self):
+        self._cursor.execute("""
+        SELECT e.id, e.amount, e.date, c.name, e.description
+        FROM expenses e
+        LEFT JOIN categories c ON e.category_id = c.id
+        """)
         expenses = self._cursor.fetchall()
-        
+
         if not expenses:
-            print("⚠️ No expenses found for the selected filter.")
+            print("⚠️ No expenses found.")
             return
-        
-        print("\n+------------------------------------------------------------+")
-        print("| ID | Amount  | Date       | Category    | Description      | Recurring |")
-        print("+------------------------------------------------------------+")
+
+        print("\n+---------------------------------------------------------------------+")
+        print("| ID | Amount  | Date       | Category    | Description              |")
+        print("+---------------------------------------------------------------------+")
         for row in expenses:
-            print(f"| {row[0]:<2} | {row[1]:<8} | {row[2]} | {row[3]:<10} | {row[4]:<15} | {row[5]:<9} |")
-        print("+------------------------------------------------------------+\n")
+            print(f"| {row[0]:<2} | {row[1]:<8} | {row[2]} | {row[3]:<10} | {row[4]:<20} |")
+        print("+---------------------------------------------------------------------+\n")
 
 
-# Main function implementing User Interaction
-if __name__ == "__main__":
-    print("📊 Welcome to Corporate Expense Manager!")
+# Main program
+def main():
+    conn = connect_main_db()
 
     while True:
-        print("\n1. Register\n2. Login\n3. Exit")
+        print("\n🚀 Corporate Expense Manager")
+        print("1. Register Company")
+        print("2. Login to Company")
+        print("3. Exit")
+        print("4. Reset Companies Table")
         choice = input("Choose an option: ")
 
-        if choice == '1':  # Register a new company
-            company_name = input("Enter company name: ")
-            password = getpass.getpass("Enter a strong password: ")
-            db = Database(company_name)
-            db.register_company(password)
+        if choice == "1":
+            name = input("Enter company name: ")
+            password = getpass.getpass("Enter password: ")
+            register_company(conn, name, password)
 
-        elif choice == '2':  # Login to an existing company
-            company_name = input("Enter company name: ")
-            password = getpass.getpass("Enter your password: ")
-            db = Database(company_name)
+        elif choice == "2":
+            name = input("Company name: ")
+            password = getpass.getpass("Password: ")
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM companies WHERE name = %s AND password = %s", (name, password))
+            result = cursor.fetchone()
 
-            if db.login_company(password):
-                print("✅ Login successful!")
-                db.switch_to_company_db()
-                expense_manager = ExpenseManager(db)  # Polymorphism (ExpenseManager inherits Database)
+            if result:
+                manager = ExpenseManager(name)
                 while True:
-                    print("\n1. Add Expense\n2. View Expenses\n3. Logout")
-                    option = input("Choose an option: ")
-                    if option == '1':
-                        expense_manager.add_expense(
-                            float(input("Enter amount: ")),
-                            input("Enter date (YYYY-MM-DD): "),
-                            input("Enter category: "),
-                            input("Enter description: "),
-                            input("Enter recurring type: ")
-                        )
-                    elif option == '2':
-                        expense_manager.view_expenses()
-                    elif option == '3':
-                        break
-            else:
-                print("❌ Incorrect password. Try again.")
+                    print("\n❤️ Welcome🤝\n1. Add Expense\n2. Delete Expense\n3. Modify Expense\n4. View Expenses\n5. Logout")
+                    action = input("Choose an action: ")
 
-        elif choice == '3':  # Exit
+                    if action == "1":
+                        manager.add_expense(
+                            float(input("Amount: ")),
+                            input("Date (YYYY-MM-DD): "),
+                            input("Category: "),
+                            input("Description: ")
+                        )
+                    elif action == "2":
+                        manager.delete_expense(int(input("Expense ID: ")))
+                    elif action == "3":
+                        manager.modify_expense(
+                            int(input("Expense ID: ")),
+                            float(input("New Amount: ")),
+                            input("New Date (YYYY-MM-DD): "),
+                            input("New Category: "),
+                            input("New Description: ")
+                        )
+                    elif action == "4":
+                        manager.view_expenses()
+                    elif action == "5":
+                        print("👋 Logged out.")
+                        break
+                    else:
+                        print("❌ Invalid choice.")
+            else:
+                print("❌ Invalid credentials.")
+            cursor.close()
+
+        elif choice == "3":
+            print("👋 Exiting... Have a great day!")
+            conn.close()
             break
+
+        elif choice == "4":
+            reset_companies_table(conn)
+
+        else:
+            print("❌ Invalid option. Try again!")
+
+
+if __name__ == "__main__":
+    main()
