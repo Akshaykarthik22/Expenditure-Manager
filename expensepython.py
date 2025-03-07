@@ -1,9 +1,8 @@
 import mysql.connector
 import getpass
 
-
-# Connect to the main database
-def connect_main_db():
+# Connect to the database
+def connect_db():
     return mysql.connector.connect(
         host="localhost",
         user="root",
@@ -11,9 +10,8 @@ def connect_main_db():
         database="corporateexpensemanager"
     )
 
-
-# Register a new company and create its own database
-def register_company(conn, name, password):
+# Ensure required tables exist
+def setup_tables(conn):
     cursor = conn.cursor()
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS companies (
@@ -21,124 +19,90 @@ def register_company(conn, name, password):
         name VARCHAR(255) UNIQUE NOT NULL,
         password TEXT NOT NULL
     )""")
+    
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        company_id INT NOT NULL,
+        FOREIGN KEY (company_id) REFERENCES companies(id)
+    )""")
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS categories (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        company_id INT NOT NULL,
+        FOREIGN KEY (company_id) REFERENCES companies(id)
+    )""")
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS expenses (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        amount DECIMAL(10,2) NOT NULL,
+        date DATE NOT NULL,
+        category_id INT,
+        description TEXT,
+        company_id INT NOT NULL,
+        FOREIGN KEY (category_id) REFERENCES categories(id),
+        FOREIGN KEY (company_id) REFERENCES companies(id)
+    )""")
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS income (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        amount DECIMAL(10,2) NOT NULL,
+        date DATE NOT NULL,
+        source TEXT NOT NULL,
+        company_id INT NOT NULL,
+        FOREIGN KEY (company_id) REFERENCES companies(id)
+    )""")
+
+    conn.commit()
+    cursor.close()
+
+# Register a new company
+def register_company(conn, name, password):
+    cursor = conn.cursor()
     try:
         cursor.execute("INSERT INTO companies (name, password) VALUES (%s, %s)", (name, password))
         conn.commit()
         print(f"✅ Company '{name}' registered successfully!")
-
-        company_db_name = f"{name.lower()}_db"
-        cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{company_db_name}`")
-        print(f"✅ Database '{company_db_name}' created!")
-
-        company_conn = mysql.connector.connect(
-            host="localhost",
-            user="root",
-            password="",
-            database=company_db_name
-        )
-        company_cursor = company_conn.cursor()
-        company_cursor.execute("""
-        CREATE TABLE IF NOT EXISTS categories (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            name VARCHAR(255) UNIQUE NOT NULL
-        )""")
-        company_cursor.execute("""
-        CREATE TABLE IF NOT EXISTS expenses (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            amount DECIMAL(10,2) NOT NULL,
-            date DATE NOT NULL,
-            category_id INT,
-            description TEXT,
-            FOREIGN KEY (category_id) REFERENCES categories(id)
-        )""")
-        company_conn.commit()
-        company_cursor.close()
-        company_conn.close()
-
     except mysql.connector.IntegrityError:
         print("❌ Company already exists!")
     cursor.close()
 
-
-# Reset the companies table and IDs
-def reset_companies_table(conn):
-    cursor = conn.cursor()
-    confirm = input("⚠️ Are you sure you want to reset the companies table? This will delete ALL companies! (yes/no): ")
-    if confirm.lower() == "yes":
-        cursor.execute("DELETE FROM companies")
-        cursor.execute("ALTER TABLE companies AUTO_INCREMENT = 1")
-        conn.commit()
-        print("✅ Companies table reset successfully. All records deleted, IDs start from 1.")
-    else:
-        print("❌ Reset cancelled.")
-    cursor.close()
-
-
 # Expense Manager class
 class ExpenseManager:
-    def __init__(self, company_name):
-        company_db = f"{company_name.lower()}_db"
-        self._conn = mysql.connector.connect(
-            host="localhost",
-            user="root",
-            password="",
-            database=company_db
-        )
+    def __init__(self, company_id):
+        self._conn = connect_db()
         self._cursor = self._conn.cursor()
+        self.company_id = company_id
 
     def add_expense(self, amount, date, category, description):
-        self._cursor.execute("SELECT id FROM categories WHERE name = %s", (category,))
+        self._cursor.execute("SELECT id FROM categories WHERE name = %s AND company_id = %s", (category, self.company_id))
         result = self._cursor.fetchone()
         if not result:
-            self._cursor.execute("INSERT INTO categories (name) VALUES (%s)", (category,))
+            self._cursor.execute("INSERT INTO categories (name, company_id) VALUES (%s, %s)", (category, self.company_id))
             self._conn.commit()
             category_id = self._cursor.lastrowid
         else:
             category_id = result[0]
 
         self._cursor.execute(
-            "INSERT INTO expenses (amount, date, category_id, description) VALUES (%s, %s, %s, %s)",
-            (amount, date, category_id, description)
+            "INSERT INTO expenses (amount, date, category_id, description, company_id) VALUES (%s, %s, %s, %s, %s)",
+            (amount, date, category_id, description, self.company_id)
         )
         self._conn.commit()
         print("✅ Expense added successfully.")
-
-    def delete_expense(self, expense_id):
-        self._cursor.execute("DELETE FROM expenses WHERE id = %s", (expense_id,))
-        self._conn.commit()
-
-        # Reset IDs after deletion
-        self._cursor.execute("SET @count = 0;")
-        self._cursor.execute("UPDATE expenses SET id = (@count := @count + 1);")
-        self._cursor.execute("ALTER TABLE expenses AUTO_INCREMENT = 1;")
-        self._conn.commit()
-
-        print("✅ Expense deleted and IDs reset.")
-
-    def modify_expense(self, expense_id, amount, date, category, description):
-        self._cursor.execute("SELECT id FROM categories WHERE name = %s", (category,))
-        result = self._cursor.fetchone()
-        if not result:
-            self._cursor.execute("INSERT INTO categories (name) VALUES (%s)", (category,))
-            self._conn.commit()
-            category_id = self._cursor.lastrowid
-        else:
-            category_id = result[0]
-
-        self._cursor.execute("""
-        UPDATE expenses
-        SET amount = %s, date = %s, category_id = %s, description = %s
-        WHERE id = %s
-        """, (amount, date, category_id, description, expense_id))
-        self._conn.commit()
-        print("✅ Expense modified successfully.")
 
     def view_expenses(self):
         self._cursor.execute("""
         SELECT e.id, e.amount, e.date, c.name, e.description
         FROM expenses e
         LEFT JOIN categories c ON e.category_id = c.id
-        """)
+        WHERE e.company_id = %s
+        """, (self.company_id,))
         expenses = self._cursor.fetchall()
 
         if not expenses:
@@ -152,17 +116,39 @@ class ExpenseManager:
             print(f"| {row[0]:<2} | {row[1]:<8} | {row[2]} | {row[3]:<10} | {row[4]:<20} |")
         print("+---------------------------------------------------------------------+\n")
 
+    def add_income(self, amount, date, source):
+        self._cursor.execute(
+            "INSERT INTO income (amount, date, source, company_id) VALUES (%s, %s, %s, %s)",
+            (amount, date, source, self.company_id)
+        )
+        self._conn.commit()
+        print("✅ Income added successfully.")
+
+    def view_income(self):
+        self._cursor.execute("SELECT id, amount, date, source FROM income WHERE company_id = %s", (self.company_id,))
+        income = self._cursor.fetchall()
+
+        if not income:
+            print("⚠️ No income records found.")
+            return
+
+        print("\n+-----------------------------------------------------------+")
+        print("| ID | Amount  | Date       | Source                       |")
+        print("+-----------------------------------------------------------+")
+        for row in income:
+            print(f"| {row[0]:<2} | {row[1]:<8} | {row[2]} | {row[3]:<30} |")
+        print("+-----------------------------------------------------------+\n")
 
 # Main program
 def main():
-    conn = connect_main_db()
+    conn = connect_db()
+    setup_tables(conn)
 
     while True:
         print("\n🚀 Corporate Expense Manager")
         print("1. Register Company")
         print("2. Login to Company")
         print("3. Exit")
-        print("4. Reset Companies Table")
         choice = input("Choose an option: ")
 
         if choice == "1":
@@ -178,9 +164,16 @@ def main():
             result = cursor.fetchone()
 
             if result:
-                manager = ExpenseManager(name)
+                company_id = result[0]
+                manager = ExpenseManager(company_id)
+
                 while True:
-                    print("\n❤️ Welcome🤝\n1. Add Expense\n2. Delete Expense\n3. Modify Expense\n4. View Expenses\n5. Logout")
+                    print("\n❤️ Welcome 🤝")
+                    print("1. Add Expense")
+                    print("2. View Expenses")
+                    print("3. Add Income")
+                    print("4. View Income")
+                    print("5. Logout")
                     action = input("Choose an action: ")
 
                     if action == "1":
@@ -191,17 +184,15 @@ def main():
                             input("Description: ")
                         )
                     elif action == "2":
-                        manager.delete_expense(int(input("Expense ID: ")))
+                        manager.view_expenses()
                     elif action == "3":
-                        manager.modify_expense(
-                            int(input("Expense ID: ")),
-                            float(input("New Amount: ")),
-                            input("New Date (YYYY-MM-DD): "),
-                            input("New Category: "),
-                            input("New Description: ")
+                        manager.add_income(
+                            float(input("Amount: ")),
+                            input("Date (YYYY-MM-DD): "),
+                            input("Source: ")
                         )
                     elif action == "4":
-                        manager.view_expenses()
+                        manager.view_income()
                     elif action == "5":
                         print("👋 Logged out.")
                         break
@@ -216,12 +207,8 @@ def main():
             conn.close()
             break
 
-        elif choice == "4":
-            reset_companies_table(conn)
-
         else:
             print("❌ Invalid option. Try again!")
-
 
 if __name__ == "__main__":
     main()
